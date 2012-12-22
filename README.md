@@ -31,8 +31,11 @@ define('pollint', default=1000, type=int, help='Polling interval')
 `Staring tornado...`<br />
 
 ## Examples
-*All examples assume you have *procstat-json* running on localhost and listening on port 8080!*
+*All examples assume you have procstat-json running on localhost and listening on port 8080!*
 
 `http://127.0.0.1:8080/stats/1`<br />
 `http://127.0.0.1:8080/stats/2`<br />
+
+![Google Chart demo](http://valiyev.net/github/procstat1.png)<br />
+![Highcharts demo](http://valiyev.net/github/procstat2.png)
 
