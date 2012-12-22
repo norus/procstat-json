@@ -150,6 +150,8 @@ class Poller(tornado.web.Application):
 class JSONHandler(tornado.web.RequestHandler):
 
   def get(self):
+    # Use with caution
+    self.set_header('Access-Control-Allow-Origin', '*')
     self.write(RESULT)
 
 # Stats handlers
@@ -188,9 +190,9 @@ if __name__ == '__main__':
       print 'Restarting tornado...'
       daemon.restart()
     else:
-      print "Unknown command"
+      print 'Unknown command'
       sys.exit(2)
     sys.exit()
   else:
-    print "Usage: %s start|stop|restart" % sys.argv[0]
+    print 'Usage: %s start|stop|restart' % sys.argv[0]
     sys.exit(2)
