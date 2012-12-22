@@ -1,0 +1,196 @@
+#!/usr/bin/env python
+
+from __future__ import division
+
+'''
+Name:
+  - procstat-json - Monitoring of /proc/{stat|net|meminfo}
+
+Description:
+  - This script gathers cpu, memory and network statistics
+    from /proc filesystem and provides JSON-like output
+
+    Included are some graph examples using Google Chart and Highcharts
+
+Required:
+  - daemon.py (http://www.jejik.com/articles/2007/02/a_simple_unix_linux_daemon_in_python)
+  - tornado (tested on 2.4.1)
+
+License:
+  - GPL3 (http://opensource.org/licenses/gpl-3.0.html)
+
+'''
+
+__author__ = 'Ruslan Valiyev | linuxoid@gmail.com'
+__version__ = '0.1'
+
+import re
+import os
+import sys
+import daemon
+from time import sleep
+import tornado.web
+import tornado.httpserver
+import tornado.ioloop
+from tornado.options import define, options
+
+cwd = os.path.dirname(os.path.realpath(__file__))
+
+# Config vars
+define('address', default='0.0.0.0', type=str, help='Listen on interface')
+define('port', default=8080, type=int, help='Listen on port')
+define('pidfile', default='/var/run/procstat-json.pid', type=str, help='PID location')
+define('logfile', default=os.path.join(cwd, 'procstat-json.log'), type=str, help='Log file')
+define('netdev', default='eth0', type=str, help='Device to query')
+define('pollint', default=1000, type=int, help='Polling interval')
+
+
+# Initial values zeroed
+RESULT = {'cpu':0, 'mem':0, 'net':[0,0]}
+
+# Main app
+class Application(tornado.web.Application):
+
+  def __init__(self):
+    handlers = [
+      (r'/data.json', JSONHandler),
+      (r'/stats/1', GoogleChart),
+      (r'/stats/2', HighChart),
+    ]
+
+    settings = dict(
+      static_path = os.path.join(cwd, 'static'),
+      template_path = os.path.join(cwd, 'templates'),
+      debug = True,
+    )
+
+    tornado.web.Application.__init__(self, handlers, **settings)
+
+
+# Poller class
+class Poller(tornado.web.Application):
+
+  # CPU stats
+  def cpu_usage(self):
+    result = {}
+
+    with open('/proc/stat') as fd:
+      pstat = fd.readline().rstrip().split(' ')
+      cpu_vals = [int(i) for i in pstat[2:]]
+      cpu_idle = cpu_vals[3]
+      cpu_total = sum(cpu_vals)
+
+      result = {'idle':cpu_idle,'total':cpu_total}
+
+      return result
+
+  # Network stats
+  def net_usage(self):
+    result = {}
+
+    with open('/proc/net/dev') as fd:
+      lines = fd.readlines()
+      _, rx_cols, tx_cols = lines[1].split('|')
+      rx_cols = map(lambda a:'recv_'+a, rx_cols.split())
+      tx_cols = map(lambda a:'trans_'+a, tx_cols.split())
+      cols = rx_cols + tx_cols
+
+      for line in lines[2:]:
+        if line.find(':') < 0: continue
+        face, data = line.split(':')
+        iface_data = dict(zip(cols, data.split()))
+
+        result[re.sub(r'\s', '', face)] = iface_data
+
+      return result
+ 
+  # Memory stats 
+  def mem_usage(self):
+    result = {}
+
+    with open('/proc/meminfo') as fd:
+      rex = {'free_mem':re.compile('MemFree.*'),
+             'total_mem':re.compile('MemTotal.*'),
+             'cache_mem':re.compile('Cached.*'),
+             'buffer_mem':re.compile('Buffers.*'),
+             'number':re.compile('[0-9]+'),}
+
+      for i in fd:
+        if rex['free_mem'].match(i): free_mem = int(rex['number'].findall(i)[0])
+        if rex['total_mem'].match(i): total_mem = int(rex['number'].findall(i)[0])
+        if rex['cache_mem'].match(i): cache_mem = int(rex['number'].findall(i)[0])
+        if rex['buffer_mem'].match(i): buffer_mem = int(rex['number'].findall(i)[0])
+
+      result = {'free_mem':free_mem,'total_mem':total_mem,'cache_mem':cache_mem,'buffer_mem':buffer_mem}
+
+      return result
+
+  def get_stats(self):
+    c1 = self.cpu_usage()
+    n1 = self.net_usage()
+    sleep(1)
+    c2 = self.cpu_usage()
+    n2 = self.net_usage()
+    m = self.mem_usage()
+    
+    cpu_usage = int(round((1000 * ((c2['total'] - c1['total']) - (c2['idle'] - c1['idle'])) / (c2['total'] - c1['total']) + 5) / 10))
+    if cpu_usage > 100: cpu_usage = 100
+    net_rx = ((int(n2[options.netdev]['recv_bytes']) - int(n1[options.netdev]['recv_bytes'])) * 8) * 100 / 1000000000
+    net_tx = ((int(n2[options.netdev]['trans_bytes']) - int(n1[options.netdev]['trans_bytes'])) * 8) * 100 / 1000000000
+    mem_usage = int(round(((m['total_mem'] - m['free_mem']) - m['cache_mem'] - m['buffer_mem']) / m['total_mem'] * 100))
+
+    RESULT['cpu'] = cpu_usage
+    RESULT['net'] = [int(round(net_rx)), int(round(net_tx))]
+    RESULT['mem'] = mem_usage
+
+  def period_run(self):
+    self.get_stats()
+
+# Handler for JSON requests
+class JSONHandler(tornado.web.RequestHandler):
+
+  def get(self):
+    self.write(RESULT)
+
+# Stats handlers
+class GoogleChart(tornado.web.RequestHandler):
+
+  def get(self):
+    self.render('googlechart.html')
+
+class HighChart(tornado.web.RequestHandler):
+
+  def get(self):
+    self.render('highcharts.html')
+
+
+class TornadoDaemon(daemon.Daemon):
+
+  def run(self):
+    while True:
+      app = Application()
+      poller = Poller()
+      app.listen(options.port, options.address)
+      tornado.ioloop.PeriodicCallback(poller.period_run, options.pollint).start()
+      tornado.ioloop.IOLoop.instance().start()
+
+if __name__ == '__main__':
+  daemon = TornadoDaemon(options.pidfile, stdout=options.logfile, stderr=options.logfile)
+
+  if len(sys.argv) == 2:
+    if 'start' == sys.argv[1]:
+      print 'Starting tornado...'
+      daemon.start()
+    elif 'stop' == sys.argv[1]:
+      print 'Stopping tornado...'
+      daemon.stop()
+    elif 'restart' == sys.argv[1]:
+      print 'Restarting tornado...'
+      daemon.restart()
+    else:
+      print "Unknown command"
+      sys.exit(2)
+    sys.exit()
+  else:
+    print "Usage: %s start|stop|restart" % sys.argv[0]
+    sys.exit(2)
